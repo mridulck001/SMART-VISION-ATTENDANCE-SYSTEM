@@ -209,5 +209,84 @@ def recognize_face():
 
 # ... rest of your routes (attendance_record, download_csv, students) remain same ...
 
+# -------- Attendance records & filters --------
+@app.route("/attendance_record", methods=["GET"])
+def attendance_record():
+    period = request.args.get("period", "all")  # all, daily, weekly, monthly
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    q = "SELECT id, student_id, name, timestamp FROM attendance"
+    params = ()
+    
+    if period == "daily":
+        today = datetime.date.today().isoformat()
+        q += " WHERE date(timestamp) = ?"
+        params = (today,)
+    elif period == "weekly":
+        start = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+        q += " WHERE date(timestamp) >= ?"
+        params = (start,)
+    elif period == "monthly":
+        start = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
+        q += " WHERE date(timestamp) >= ?"
+        params = (start,)
+        
+    q += " ORDER BY timestamp DESC LIMIT 5000"
+    c.execute(q, params)
+    rows = c.fetchall()
+    conn.close()
+    
+    return render_template("attendance_record.html", records=rows, period=period)
+
+# -------- CSV download --------
+@app.route("/download_csv", methods=["GET"])
+def download_csv():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, student_id, name, timestamp FROM attendance ORDER BY timestamp DESC")
+    rows = c.fetchall()
+    conn.close()
+    
+    output = io.StringIO()
+    output.write("id,student_id,name,timestamp\n")
+    for r in rows:
+        output.write(f'{r[0]},{r[1]},{r[2]},{r[3]}\n')
+        
+    mem = io.BytesIO()
+    mem.write(output.getvalue().encode("utf-8"))
+    mem.seek(0)
+    
+    return send_file(mem, as_attachment=True, download_name="attendance.csv", mimetype="text/csv")
+
+# -------- Students API for listing/editing --------
+@app.route("/students", methods=["GET"])
+def students_list():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, name, roll, class, section, reg_no, created_at FROM students ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+    
+    data = [ {"id":r[0],"name":r[1],"roll":r[2],"class":r[3],"section":r[4],"reg_no":r[5],"created_at":r[6]} for r in rows ]
+    return jsonify({"students": data})
+
+@app.route("/students/<int:sid>", methods=["DELETE"])
+def delete_student(sid):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM students WHERE id=?", (sid,))
+    c.execute("DELETE FROM attendance WHERE student_id=?", (sid,))
+    conn.commit()
+    conn.close()
+    
+    # also delete dataset folder
+    folder = os.path.join(DATASET_DIR, str(sid))
+    if os.path.isdir(folder):
+        import shutil
+        shutil.rmtree(folder, ignore_errors=True)
+        
+    return jsonify({"deleted": True})
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=7860, debug=False)
