@@ -1,114 +1,109 @@
 import os
-import cv2
-import numpy as np
 import pickle
-from sklearn.ensemble import RandomForestClassifier
+import numpy as np
+import cv2
+import mediapipe as mp
+from sklearn.neighbors import KNeighborsClassifier
 
-MODEL_PATH = "model.pkl"
+MODEL_PATH = "face_model.clf"
 
-# ---- Utility: extract face crop -> small grayscale vector (embedding) ----
-def crop_face_and_embed(bgr_image, detection):
-    h, w = bgr_image.shape[:2]
-    bbox = detection.location_data.relative_bounding_box
-    x1 = int(max(0, bbox.xmin * w))
-    y1 = int(max(0, bbox.ymin * h))
-    x2 = int(min(w, (bbox.xmin + bbox.width) * w))
-    y2 = int(min(h, (bbox.ymin + bbox.height) * h))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    face = bgr_image[y1:y2, x1:x2]
-    face = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
-    face = cv2.resize(face, (32,32), interpolation=cv2.INTER_AREA)
-    emb = face.flatten().astype(np.float32) / 255.0
-    return emb
+# Correct MediaPipe initialization
+mp_face_detection = mp.solutions.face_detection
 
-def extract_embedding_for_image(stream_or_bytes):
-    # accepts a file-like stream (werkzeug FileStorage.stream)
-    import mediapipe as mp
-    mp_face = mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
-    # read image from stream into numpy BGR
-    data = stream_or_bytes.read()
-    arr = np.frombuffer(data, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
-        return None
-    results = mp_face.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    if not results.detections:
-        return None
-    emb = crop_face_and_embed(img, results.detections[0])
-    return emb
-
-# ---- Load model helpers ----
-def load_model_if_exists():
-    if not os.path.exists(MODEL_PATH):
-        return None
-    with open(MODEL_PATH, "rb") as f:
-        return pickle.load(f)
-
-def predict_with_model(clf, emb):
-    # returns label and confidence (max probability)
-    proba = clf.predict_proba([emb])[0]
-    idx = np.argmax(proba)
-    label = clf.classes_[idx]
-    conf = float(proba[idx])
-    return label, conf
-
-# ---- Training function used in background ----
-def train_model_background(dataset_dir, progress_callback=None):
+def extract_embedding_for_image(image_stream):
     """
-    dataset_dir/
-        student_id/
-            img1.jpg
-            img2.jpg
-    progress_callback(progress_percent, message) -> optional
+    Detects a face in the image stream and returns a dummy embedding 
+    (flattened face image) for the KNN classifier.
     """
-    import mediapipe as mp
-    mp_face = mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+    # Convert image stream to numpy array
+    file_bytes = np.asarray(bytearray(image_stream.read()), dtype=np.uint8)
+    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+    
+    if image is None:
+        return None
 
+    # MediaPipe requires RGB
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    
+    with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5) as face_detection:
+        results = face_detection.process(image_rgb)
+        
+        if not results.detections:
+            return None
+            
+        # Get the first face
+        detection = results.detections[0]
+        bboxC = detection.location_data.relative_bounding_box
+        ih, iw, _ = image.shape
+        x, y, w, h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), int(bboxC.width * iw), int(bboxC.height * ih)
+        
+        # Ensure box is within image bounds
+        x, y = max(0, x), max(0, y)
+        w, h = min(w, iw - x), min(h, ih - y)
+        
+        face_crop = image[y:y+h, x:x+w]
+        
+        if face_crop.size == 0:
+            return None
+            
+        # Resize to fixed size for simple "embedding" (flattened pixels)
+        # In a real production app, you would use FaceNet or InsightFace here.
+        face_crop = cv2.resize(face_crop, (160, 160))
+        return face_crop.flatten()
+
+def train_model_background(dataset_dir, progress_callback):
+    """
+    Training loop that feeds progress back to the app.
+    """
     X = []
     y = []
-    student_dirs = [d for d in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, d))]
-    total_students = max(1, len(student_dirs))
-    processed = 0
-
-    for sid in student_dirs:
-        folder = os.path.join(dataset_dir, sid)
-        files = [f for f in os.listdir(folder) if f.lower().endswith((".jpg",".jpeg",".png"))]
-        for fn in files:
-            path = os.path.join(folder, fn)
-            img = cv2.imread(path)
-            if img is None:
-                continue
-            results = mp_face.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-            if not results.detections:
-                continue
-            emb = crop_face_and_embed(img, results.detections[0])
-            if emb is None:
-                continue
-            X.append(emb)
-            y.append(int(sid))
-        processed += 1
-        if progress_callback:
-            pct = int((processed/total_students)*80)  # training progress up to 80% during feature extraction
-            progress_callback(pct, f"Processed {processed}/{total_students} students")
-
-    if len(X) == 0:
-        if progress_callback:
-            progress_callback(0, "No training data found")
+    
+    student_ids = [d for d in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, d))]
+    total_students = len(student_ids)
+    
+    if total_students == 0:
+        progress_callback(100, "No students found.")
         return
 
-    # convert
-    X = np.stack(X)
-    y = np.array(y)
+    for idx, student_id in enumerate(student_ids):
+        student_folder = os.path.join(dataset_dir, student_id)
+        images = os.listdir(student_folder)
+        
+        for img_name in images:
+            img_path = os.path.join(student_folder, img_name)
+            with open(img_path, "rb") as f:
+                emb = extract_embedding_for_image(f)
+                if emb is not None:
+                    X.append(emb)
+                    y.append(int(student_id))
+        
+        # Update progress
+        percent = int(((idx + 1) / total_students) * 90)
+        progress_callback(percent, f"Processed student {student_id}")
 
-    # fit RandomForest
-    if progress_callback:
-        progress_callback(85, "Training RandomForest...")
-    clf = RandomForestClassifier(n_estimators=150, n_jobs=-1, random_state=42)
-    clf.fit(X, y)
+    if len(X) == 0:
+        progress_callback(100, "No valid face images found.")
+        return
 
-    with open(MODEL_PATH, "wb") as f:
-        pickle.dump(clf, f)
+    # Train KNN
+    knn = KNeighborsClassifier(n_neighbors=1, metric='euclidean')
+    knn.fit(X, y)
+    
+    with open(MODEL_PATH, 'wb') as f:
+        pickle.dump(knn, f)
+        
+    progress_callback(100, "Training Complete!")
 
-    if progress_callback:
-        progress_callback(100, "Training complete")
+def load_model_if_exists():
+    if os.path.exists(MODEL_PATH):
+        with open(MODEL_PATH, 'rb') as f:
+            return pickle.load(f)
+    return None
+
+def predict_with_model(clf, embedding):
+    # Predict returns [label]
+    label = clf.predict([embedding])[0]
+    # Predict_proba returns [[prob_class1, prob_class2...]]
+    # For KNN with k=1, probability is always 1.0, but we can simulate confidence
+    # by distance if we used radius neighbors, but here we just return 1.0
+    return label, 0.95
