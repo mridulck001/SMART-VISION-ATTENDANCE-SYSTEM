@@ -254,4 +254,5 @@ def delete_student(sid):
 
 # ---------------- run ------------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    # Change port to 7860 and host to 0.0.0.0
+    app.run(host="0.0.0.0", port=7860, debug=False)
