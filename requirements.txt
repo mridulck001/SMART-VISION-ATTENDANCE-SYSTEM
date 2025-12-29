@@ -1,8 +1,7 @@
-streamlit
+Flask
 mediapipe
 opencv-python-headless
 scikit-learn
 pandas
 numpy
 Pillow
-flask
