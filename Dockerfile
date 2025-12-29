@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Install system dependencies for MediaPipe
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
     libgl1 \
@@ -9,19 +9,21 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Install Python requirements
+# Install requirements FIRST
 COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir mediapipe==0.10.9
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --upgrade mediapipe
 
-# Copy all files (including static/ and templates/)
+# Copy app files
 COPY . .
 
-# Ensure data directories are writable
+# --- NEW TRICK: Delete any local mediapipe folder/file that was copied ---
+RUN rm -rf /app/mediapipe /app/mediapipe.py
+
+# Create dataset directory
 RUN mkdir -p dataset && chmod 777 dataset
 
-# Hugging Face MUST use port 7860
 EXPOSE 7860
 
-# Run the app
 CMD ["python", "app.py"]
