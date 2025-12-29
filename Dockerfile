@@ -1,11 +1,10 @@
-# Use a stable Python version
 FROM python:3.10-slim
 
-# Install system dependencies for MediaPipe and OpenCV
+# Install modern system dependencies for MediaPipe and OpenCV
 RUN apt-get update && apt-get install -y \
     build-essential \
     cmake \
-    libgl1-mesa-glx \
+    libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -15,14 +14,14 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
+# Copy your Flask app files (since your app.py uses Flask)
 COPY . .
 
-# Create directory for datasets and set permissions
+# Ensure the dataset folder exists
 RUN mkdir -p dataset && chmod 777 dataset
 
-# Expose Streamlit's default port
-EXPOSE 8501
+# Hugging Face Spaces port for Flask
+EXPOSE 7860
 
-# Run with XSRF protection disabled to prevent 403 errors on Hugging Face
-ENTRYPOINT ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0", "--server.enableXsrfProtection=false"]
+# Run Flask on port 7860 and bind to 0.0.0.0
+CMD ["python", "app.py"]
