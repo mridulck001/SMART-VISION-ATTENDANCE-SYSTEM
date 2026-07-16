@@ -5,7 +5,8 @@ import sqlite3
 import datetime
 import json
 import logging
-from flask import Flask, render_template, request, jsonify, send_file, abort
+from functools import wraps
+from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, url_for, session
 
 # Import your custom model helpers
 # NOTE: Ensure model.py exists and has these functions!
@@ -18,7 +19,11 @@ os.makedirs(DATASET_DIR, exist_ok=True)
 TRAIN_STATUS_FILE = os.path.join(APP_DIR, "train_status.json")
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-key-change-me")
 logging.basicConfig(level=logging.INFO)
+
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -61,11 +66,71 @@ def read_train_status():
 
 write_train_status({"running": False, "progress": 0, "message": "No training yet."})
 
+
+def admin_required(view_func):
+    @wraps(view_func)
+    def wrapped(*args, **kwargs):
+        if not session.get("admin_logged_in"):
+            api_paths = {"/upload_face", "/train_model", "/train_status", "/attendance_stats", "/add_student"}
+            if request.path in api_paths or request.method != "GET" or request.accept_mimetypes.best == "application/json" or request.is_json:
+                return jsonify({"error": "admin login required"}), 401
+            return redirect(url_for("admin_login", next=request.path))
+        return view_func(*args, **kwargs)
+
+    return wrapped
+
 @app.route("/")
 def index():
     return render_template("index.html")
 
+
+@app.route("/admin", methods=["GET"])
+@admin_required
+def admin_dashboard():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM students")
+    student_count = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM attendance")
+    attendance_count = c.fetchone()[0]
+    c.execute("SELECT name, timestamp FROM attendance ORDER BY timestamp DESC LIMIT 5")
+    recent_attendance = c.fetchall()
+    conn.close()
+
+    return render_template(
+        "admin_dashboard.html",
+        student_count=student_count,
+        attendance_count=attendance_count,
+        recent_attendance=recent_attendance,
+        train_status=read_train_status(),
+    )
+
+
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    error = None
+    next_url = request.args.get("next") or request.form.get("next") or url_for("admin_dashboard")
+
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+
+        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+            session["admin_logged_in"] = True
+            return redirect(next_url)
+
+        error = "Invalid admin credentials."
+
+    return render_template("admin_login.html", error=error, next_url=next_url, default_username=ADMIN_USERNAME)
+
+
+@app.route("/admin/logout", methods=["GET"])
+def admin_logout():
+    session.clear()
+    return redirect(url_for("index"))
+
 @app.route("/attendance_stats")
+@admin_required
 def attendance_stats():
     try:
         import pandas as pd
@@ -90,6 +155,7 @@ def attendance_stats():
     return jsonify({"dates": dates, "counts": counts})
 
 @app.route("/add_student", methods=["GET", "POST"])
+@admin_required
 def add_student():
     if request.method == "GET":
         return render_template("add_student.html")
@@ -112,6 +178,7 @@ def add_student():
     return jsonify({"student_id": sid})
 
 @app.route("/upload_face", methods=["POST"])
+@admin_required
 def upload_face():
     student_id = request.form.get("student_id")
     if not student_id:
@@ -149,6 +216,7 @@ def training_worker(dataset_dir):
         write_train_status({"running": False, "progress": 0, "message": f"Failed: {str(e)}"})
 
 @app.route("/train_model", methods=["GET"])
+@admin_required
 def train_model_route():
     status = read_train_status()
     if status.get("running"):
@@ -163,6 +231,7 @@ def train_model_route():
     return jsonify({"status":"started"}), 202
 
 @app.route("/train_status", methods=["GET"])
+@admin_required
 def train_status():
     return jsonify(read_train_status())
 
@@ -211,6 +280,7 @@ def recognize_face():
 
 # -------- Attendance records & filters --------
 @app.route("/attendance_record", methods=["GET"])
+@admin_required
 def attendance_record():
     period = request.args.get("period", "all")  # all, daily, weekly, monthly
     conn = sqlite3.connect(DB_PATH)
@@ -241,6 +311,7 @@ def attendance_record():
 
 # -------- CSV download --------
 @app.route("/download_csv", methods=["GET"])
+@admin_required
 def download_csv():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()

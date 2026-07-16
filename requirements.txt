@@ -1,5 +1,5 @@
 Flask
-mediapipe==0.10.9
+mediapipe
 opencv-python-headless
 scikit-learn
 pandas
